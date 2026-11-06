@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+import os
 import threading
 import time
 import tracemalloc
@@ -1246,6 +1247,33 @@ class TestFileSessionStore:
 
         stored = await store.get("session-1")
 
+        assert stored is not None
+        assert stored.session_id == "second"
+        temp_files = await asyncio.to_thread(lambda: [*tmp_path.glob("*.tmp"), *tmp_path.glob(".*.tmp")])
+        assert not temp_files
+
+    async def test_set_retries_transient_permission_error_during_atomic_replace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = FileSessionStore(tmp_path)
+        await store.set("session-1", AgentSession(session_id="first"))
+
+        real_replace = os.replace
+        attempts = 0
+
+        def flaky_replace(source: Any, target: Any) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise PermissionError(13, "Access is denied")
+            real_replace(source, target)
+
+        monkeypatch.setattr(os, "replace", flaky_replace)
+
+        await store.set("session-1", AgentSession(session_id="second"))
+
+        assert attempts >= 2
+        stored = await store.get("session-1")
         assert stored is not None
         assert stored.session_id == "second"
         temp_files = await asyncio.to_thread(lambda: [*tmp_path.glob("*.tmp"), *tmp_path.glob(".*.tmp")])
