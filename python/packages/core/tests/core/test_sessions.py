@@ -1,8 +1,10 @@
 # Copyright (c) Microsoft. All rights reserved.
 
 import asyncio
+import errno
 import json
 import math
+import os
 import threading
 import time
 import tracemalloc
@@ -1129,6 +1131,60 @@ class TestFileSessionStore:
                 await store.delete("session-1")
 
         mark_feature_used_mock.assert_called_once_with(FeatureIndex.CORE_SESSION_STORE)
+
+    async def test_set_retries_a_transient_refusal_of_the_atomic_replace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A replacement refused while the destination is briefly held open is retried.
+
+        Windows refuses the replacement when the snapshot is still open elsewhere, which a
+        concurrent save of the same session, a reader, or a background indexer can cause.
+        The save must complete instead of reporting that refusal to the caller.
+        """
+        from agent_framework import _sessions
+
+        store = FileSessionStore(tmp_path)
+        replacements = {"count": 0}
+        real_replace = os.replace
+
+        def flaky_replace(source: Any, destination: Any) -> None:
+            replacements["count"] += 1
+            if replacements["count"] <= 2:
+                raise PermissionError(errno.EACCES, "Access is denied", str(destination))
+            real_replace(source, destination)
+
+        monkeypatch.setattr(_sessions, "_ATOMIC_REPLACE_DELAY_SECONDS", 0.0)
+        monkeypatch.setattr(os, "replace", flaky_replace)
+
+        await store.set("session-1", AgentSession(session_id="session-1"))
+
+        assert replacements["count"] == 3
+        restored = await store.get("session-1")
+        assert restored is not None
+        assert restored.session_id == "session-1"
+
+    async def test_set_stops_retrying_and_raises_when_the_destination_stays_locked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A destination that never becomes replaceable still raises, after a bounded retry."""
+        from agent_framework import _sessions
+
+        store = FileSessionStore(tmp_path)
+        replacements = {"count": 0}
+
+        def denied_replace(source: Any, destination: Any) -> None:
+            replacements["count"] += 1
+            raise PermissionError(errno.EACCES, "Access is denied", str(destination))
+
+        monkeypatch.setattr(_sessions, "_ATOMIC_REPLACE_DELAY_SECONDS", 0.0)
+        monkeypatch.setattr(os, "replace", denied_replace)
+
+        with pytest.raises(PermissionError):
+            await store.set("session-1", AgentSession(session_id="session-1"))
+
+        assert replacements["count"] == _sessions._ATOMIC_REPLACE_ATTEMPTS
+        # The temporary file is removed even when the replacement never happened.
+        assert [name for name in os.listdir(tmp_path) if name.endswith(".tmp")] == []
 
     async def test_round_trips_session_across_store_instances(self, tmp_path: Path) -> None:
         session = AgentSession(session_id="framework-session", service_session_id={"response_id": "resp-1"})
