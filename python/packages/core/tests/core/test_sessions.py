@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import math
 import os
 import threading
@@ -1380,6 +1381,25 @@ class TestFileSessionStore:
         quarantined_files = await asyncio.to_thread(lambda: list(tmp_path.glob(".maf-*.corrupt")))
         assert len(quarantined_files) == 1
         assert len(quarantined_files[0].name) <= 48
+
+    async def test_corrupt_quarantine_logs_the_snapshot_path(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The bounded quarantine name drops the session id, so the warning must keep it attributable."""
+        store = FileSessionStore(tmp_path)
+        session_file = store._session_file_path("session-1")
+        await asyncio.to_thread(session_file.write_bytes, b"not-json")
+
+        with (
+            caplog.at_level(logging.WARNING, logger="agent_framework"),
+            pytest.raises(ValueError, match="quarantined.*retry"),
+        ):
+            await store.get("session-1")
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            session_file.name in message and ".maf-" in message and ".corrupt" in message for message in messages
+        ), messages
 
     async def test_corrupt_quarantine_survives_legacy_windows_max_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

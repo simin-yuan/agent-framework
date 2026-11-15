@@ -2467,6 +2467,13 @@ class FileSessionStore(SessionStore):
             return None
         quarantine_path = file_path.with_name(f".maf-{uuid.uuid4().hex}.corrupt")
         os.replace(file_path, quarantine_path)
+        # The bounded name no longer carries the session id, so log the snapshot path here: the
+        # quarantine file is otherwise unattributable to the session it came from.
+        logger.warning(
+            "Session snapshot %s was corrupt; moved it aside to %s so the session can be created again.",
+            file_path,
+            quarantine_path,
+        )
         return quarantine_path
 
     @classmethod
