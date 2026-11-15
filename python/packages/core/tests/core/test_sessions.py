@@ -1378,9 +1378,9 @@ class TestFileSessionStore:
             await store.get(session_id)
 
         assert not session_file.exists()
-        quarantined_files = await asyncio.to_thread(lambda: list(tmp_path.glob(".maf-*.corrupt")))
+        quarantined_files = await asyncio.to_thread(lambda: list(tmp_path.glob(".*.corrupt")))
         assert len(quarantined_files) == 1
-        assert len(quarantined_files[0].name) <= 48
+        assert len(quarantined_files[0].name) <= 41  # "." + 32 hex chars + ".corrupt"
 
     async def test_corrupt_quarantine_logs_the_snapshot_path(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -1397,9 +1397,7 @@ class TestFileSessionStore:
             await store.get("session-1")
 
         messages = [record.getMessage() for record in caplog.records]
-        assert any(
-            session_file.name in message and ".maf-" in message and ".corrupt" in message for message in messages
-        ), messages
+        assert any(session_file.name in message and ".corrupt" in message for message in messages), messages
 
     async def test_corrupt_quarantine_survives_legacy_windows_max_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1436,7 +1434,7 @@ class TestFileSessionStore:
             await deep_store.get(session_id)
 
         assert not session_file.exists()
-        quarantined_files = await asyncio.to_thread(lambda: list(deep_root.glob(".maf-*.corrupt")))
+        quarantined_files = await asyncio.to_thread(lambda: list(deep_root.glob(".*.corrupt")))
         assert len(quarantined_files) == 1
 
     async def test_corrupt_quarantine_short_id_at_deep_root_does_not_regress(
@@ -1445,8 +1443,8 @@ class TestFileSessionStore:
         """A short session id at a deep root must keep the quarantine path it had before.
 
         The previous destination embedded the snapshot name, so for a one-character id it was 48
-        characters long. The bounded name must not be longer than that, otherwise a root where the
-        quarantine used to fit would start failing.
+        characters long. The bounded name is 41 characters, so a root where the quarantine used to
+        fit keeps fitting.
         """
         padding = 206 - len(str(tmp_path)) - 1
         if padding <= 1:
@@ -1471,7 +1469,7 @@ class TestFileSessionStore:
             await store.get("x")
 
         assert not session_file.exists()
-        quarantined_files = await asyncio.to_thread(lambda: list(deep_root.glob(".maf-*.corrupt")))
+        quarantined_files = await asyncio.to_thread(lambda: list(deep_root.glob(".*.corrupt")))
         assert len(quarantined_files) == 1
         assert len(str(quarantined_files[0])) < 260
 
