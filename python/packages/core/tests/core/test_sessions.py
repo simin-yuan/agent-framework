@@ -1361,6 +1361,63 @@ class TestFileSessionStore:
         assert len(quarantined_files) == 1
         assert await store.get("session-1") is None
 
+    async def test_corrupt_quarantine_name_does_not_grow_with_the_session_id(self, tmp_path: Path) -> None:
+        """The quarantine destination must not embed the snapshot name.
+
+        On Windows with legacy MAX_PATH handling, a 128-character session id already puts the
+        snapshot near the limit; adding the full snapshot name plus a UUID to the quarantine
+        destination makes the rename fail and leaves the corrupt file in place (#9885).
+        """
+        store = FileSessionStore(tmp_path)
+        session_id = "x" * FileSessionStore.MAX_SESSION_ID_LENGTH
+        session_file = store._session_file_path(session_id)
+        await asyncio.to_thread(session_file.write_bytes, b"not-json")
+
+        with pytest.raises(ValueError, match="quarantined.*retry"):
+            await store.get(session_id)
+
+        assert not session_file.exists()
+        quarantined_files = await asyncio.to_thread(lambda: list(tmp_path.glob(".maf-session-*.corrupt")))
+        assert len(quarantined_files) == 1
+        assert len(quarantined_files[0].name) <= 64
+
+    async def test_corrupt_quarantine_survives_legacy_windows_max_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 253-character snapshot path must still be quarantined when rename is capped at 260.
+
+        Simulates the Windows legacy limit on the destination of ``os.replace`` so the case runs
+        on every platform; with the snapshot name embedded in the quarantine name the destination
+        is ~295 characters and the rename raises, which is the reported failure.
+        """
+        store = FileSessionStore(tmp_path)
+        session_id = "x" * FileSessionStore.MAX_SESSION_ID_LENGTH
+        sample_path = store._session_file_path(session_id)
+        padding = 252 - len(str(tmp_path)) - 1 - len(sample_path.name)
+        assert padding > 0
+        deep_root = tmp_path / ("d" * padding)
+        deep_root.mkdir()
+        deep_store = FileSessionStore(deep_root)
+        session_file = deep_store._session_file_path(session_id)
+        assert len(str(session_file)) == 253
+        await asyncio.to_thread(session_file.write_bytes, b"not-json")
+
+        real_replace = os.replace
+
+        def limited_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+            if len(str(dst)) >= 260:
+                raise FileNotFoundError(3, "The system cannot find the path specified", str(dst))
+            real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", limited_replace)
+
+        with pytest.raises(ValueError, match="quarantined.*retry"):
+            await deep_store.get(session_id)
+
+        assert not session_file.exists()
+        quarantined_files = await asyncio.to_thread(lambda: list(deep_root.glob(".maf-session-*.corrupt")))
+        assert len(quarantined_files) == 1
+
     async def test_invalid_registered_payload_preserves_snapshot(self, tmp_path: Path) -> None:
         store = FileSessionStore(tmp_path)
         session_file = store._session_file_path("session-1")
