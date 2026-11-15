@@ -2465,7 +2465,7 @@ class FileSessionStore(SessionStore):
             return None
         if current_serialized != serialized:
             return None
-        quarantine_path = file_path.with_name(f".maf-session-{uuid.uuid4().hex}.corrupt")
+        quarantine_path = file_path.with_name(f".maf-{uuid.uuid4().hex}.corrupt")
         os.replace(file_path, quarantine_path)
         return quarantine_path
 

@@ -1377,9 +1377,9 @@ class TestFileSessionStore:
             await store.get(session_id)
 
         assert not session_file.exists()
-        quarantined_files = await asyncio.to_thread(lambda: list(tmp_path.glob(".maf-session-*.corrupt")))
+        quarantined_files = await asyncio.to_thread(lambda: list(tmp_path.glob(".maf-*.corrupt")))
         assert len(quarantined_files) == 1
-        assert len(quarantined_files[0].name) <= 64
+        assert len(quarantined_files[0].name) <= 48
 
     async def test_corrupt_quarantine_survives_legacy_windows_max_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1394,7 +1394,8 @@ class TestFileSessionStore:
         session_id = "x" * FileSessionStore.MAX_SESSION_ID_LENGTH
         sample_path = store._session_file_path(session_id)
         padding = 252 - len(str(tmp_path)) - 1 - len(sample_path.name)
-        assert padding > 0
+        if padding <= 0:
+            pytest.skip("pytest temporary root is too long to build a near-MAX_PATH case")
         deep_root = tmp_path / ("d" * padding)
         deep_root.mkdir()
         deep_store = FileSessionStore(deep_root)
@@ -1415,8 +1416,44 @@ class TestFileSessionStore:
             await deep_store.get(session_id)
 
         assert not session_file.exists()
-        quarantined_files = await asyncio.to_thread(lambda: list(deep_root.glob(".maf-session-*.corrupt")))
+        quarantined_files = await asyncio.to_thread(lambda: list(deep_root.glob(".maf-*.corrupt")))
         assert len(quarantined_files) == 1
+
+    async def test_corrupt_quarantine_short_id_at_deep_root_does_not_regress(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A short session id at a deep root must keep the quarantine path it had before.
+
+        The previous destination embedded the snapshot name, so for a one-character id it was 48
+        characters long. The bounded name must not be longer than that, otherwise a root where the
+        quarantine used to fit would start failing.
+        """
+        padding = 206 - len(str(tmp_path)) - 1
+        if padding <= 1:
+            pytest.skip("pytest temporary root is too long to build the 206-character root")
+        deep_root = tmp_path / ("d" * padding)
+        deep_root.mkdir()
+        assert len(str(deep_root)) == 206
+        store = FileSessionStore(deep_root)
+        session_file = store._session_file_path("x")
+        await asyncio.to_thread(session_file.write_bytes, b"not-json")
+
+        real_replace = os.replace
+
+        def limited_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+            if len(str(dst)) >= 260:
+                raise FileNotFoundError(3, "The system cannot find the path specified", str(dst))
+            real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", limited_replace)
+
+        with pytest.raises(ValueError, match="quarantined.*retry"):
+            await store.get("x")
+
+        assert not session_file.exists()
+        quarantined_files = await asyncio.to_thread(lambda: list(deep_root.glob(".maf-*.corrupt")))
+        assert len(quarantined_files) == 1
+        assert len(str(quarantined_files[0])) < 260
 
     async def test_invalid_registered_payload_preserves_snapshot(self, tmp_path: Path) -> None:
         store = FileSessionStore(tmp_path)
